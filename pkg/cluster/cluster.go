@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,9 +64,13 @@ func setupCluster(t *testing.T) *K3dCluster {
 	l.Log().Info("testcluster-go: Creating cluster during  ")
 	var err error
 	ctx := context.Background()
-	cluster, err := CreateK3dCluster(ctx, "hello-world")
+	cluster, err := CreateK3dCluster(ctx, "tcg-"+"hello-world")
 	if err != nil {
+		if strings.Contains(err.Error(), "port is already allocated") {
+			l.Log().Error("Port is already allocated. Was another test-cluster running not properly cleaned up? The clean-up instruction might help.")
+		}
 		t.Errorf("Unexpected error during test setup: %s\n", err)
+		return nil
 	}
 	l.Log().Info("testcluster-go: Cluster was successfully created")
 
