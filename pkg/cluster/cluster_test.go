@@ -1,60 +1,34 @@
-package cluster_test
+package cluster
 
 import (
 	"context"
 	_ "embed"
-	"fmt"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/test-clusters/testclusters-go/pkg/cluster"
+	fake "k8s.io/client-go/kubernetes/fake"
 )
 
-//go:embed testdata/simpleNginxDeployment.yaml
-var simpleNginxDeploymentBytes []byte
+var testCtx = context.Background()
 
-//go:embed testdata/simpleEchoPod.yaml
-var simpleEchoPodBytes []byte
-
-func TestIntegration(t *testing.T) {
-	// given
-	cl := cluster.NewK3dCluster(t)
-	ctx := context.Background()
-
-	kubectl, err := cl.CtlKube(t.Name())
-	require.NoError(t, err)
-
-	// when
-	err = kubectl.ApplyWithFile(ctx, simpleNginxDeploymentBytes)
-	require.NoError(t, err)
-	err = kubectl.ApplyWithFile(ctx, simpleEchoPodBytes)
-	require.NoError(t, err)
-
-	lookout := cl.Lookout(t)
-
-	pods := lookout.Pods(cluster.DefaultNamespace).ByLabels("app=nginx").ByFieldSelector("status.phase=Running").List()
-	assert.EventuallyWithT(t, func(collectT *assert.CollectT) {
-		err := pods.Len(ctx, 3)
-		if err != nil {
-			collectT.Errorf("%w", err)
+func TestK3dCluster_NodeInfo(t *testing.T) {
+	t.Run("should return node info", func(t *testing.T) {
+		// given
+		node := &v1.Node{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "node-namespace", Name: "node-name"},
 		}
-	}, 60*time.Second, 1*time.Second)
+		clientset := fake.NewSimpleClientset(node)
+		sut := K3dCluster{clientSet: clientset}
 
-	podList, err := pods.Raw(ctx)
-	require.NoError(t, err)
+		// when
+		actual, err := sut.NodeInfo(testCtx)
 
-	events, err := cl.Lookout(t).Pod(cluster.DefaultNamespace, podList.Items[0].Name).Events(ctx)
-	require.NoError(t, err)
-	fmt.Printf("%#v", events)
-
-	actualLogs, err := cl.Lookout(t).Pod(cluster.DefaultNamespace, "echo-pod").Logs(ctx)
-	require.NoError(t, err)
-
-	assert.Equal(t, "hello world\n", string(actualLogs))
-
-	// then
-	assert.NoError(t, err)
+		// then
+		require.NoError(t, err)
+		assert.Equal(t, NodeInfo{node}, actual)
+	})
 }

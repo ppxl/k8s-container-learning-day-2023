@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
+// MustGenerateK8sName returns a random alphanumeric name that is RFC 1123 compatible (DNS)
 func MustGenerateK8sName(prefix string) string {
 	if prefix != "" {
 		rfcCheckErrs := validation.IsDNS1123Label(prefix)
