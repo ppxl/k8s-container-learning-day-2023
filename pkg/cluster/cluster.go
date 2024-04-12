@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/stretchr/testify/require"
+	"github.com/test-clusters/testclusters-go/pkg/cluster/health"
 	"math/rand"
 	"path/filepath"
 	"regexp"
@@ -59,6 +60,10 @@ const restrictedContainerNameChars = `[a-zA-Z0-9][a-zA-Z0-9_.-]{1..37}`
 
 var restrictedContainerNamePattern = regexp.MustCompile(`^` + restrictedContainerNameChars + `$`)
 
+const (
+	nodeHealthEvictionHardEmpty = ""
+)
+
 // Loglevel describes the verbosity of log messages being printed from testcluster-go
 type Loglevel int
 
@@ -74,13 +79,21 @@ type testcluster interface {
 	Terminate(ctx context.Context) error
 }
 
-// Opts allows customizing the K3d cluster creation.
+// Opts allows customizing the K3d cluster's creation and operation.
 type Opts struct {
-	// ClusterNamePrefix will be used to name the cluster so developers can discover and address a cluster among others.
+	// ClusterNamePrefix will be used to name the cluster so developers can discover
+	// and address a cluster among others.
+	// The cluster name prefix will be delimited by the default delimiter "-".
 	// Defaults to the empty string which is allowed.
 	ClusterNamePrefix string
-	// Loglevel adjusts the verbosity of log outputs produces by K3dCluster. Defaults to Warning.
+	// LogLevel allows increases or decreases the testcluster-go's log verbosity.
+	// Currently, k3d's log verbosity cannot be adjusted with this field.
+	// Defaults to Warning.
 	LogLevel Loglevel
+	// NodeConditionEvictionHardArg allows tuning the kubelet's evictionHard argument.
+	// Defaults to empty string.
+	// See health.KubeletEvictionFsByPercentage for a helper function
+	NodeConditionEvictionHardArg string
 }
 
 // K3dCluster abstracts the cluster management during developer tests.
@@ -98,7 +111,11 @@ type K3dCluster struct {
 // engine and default values. This method is the usual entry point of a test with
 // testclusters-go.
 func NewK3dCluster(t *testing.T) *K3dCluster {
-	defaultOpts := Opts{ClusterNamePrefix: "", LogLevel: Warning}
+	defaultOpts := Opts{
+		ClusterNamePrefix:            "",
+		LogLevel:                     Warning,
+		NodeConditionEvictionHardArg: nodeHealthEvictionHardEmpty,
+	}
 	return NewK3dClusterWithOpts(t, defaultOpts)
 }
 
@@ -121,7 +138,9 @@ func mustSetupCluster(t *testing.T, opts Opts) *K3dCluster {
 		l.Log().Error(errMsg)
 		_ = panicAtStartError(ctx, nil, err)
 	}
-	cluster, err := CreateK3dCluster(ctx, t, clusterNamePrefix)
+	opts.ClusterNamePrefix = clusterNamePrefix
+
+	cluster, err := CreateK3dCluster(ctx, opts)
 	if err != nil {
 		if strings.Contains(err.Error(), "port is already allocated") {
 			l.Log().Error("Port is already allocated. Was another test-cluster running not properly cleaned up? The clean-up instruction might help.")
@@ -183,7 +202,7 @@ func registerTearDown(t *testing.T, cluster *K3dCluster) {
 	})
 }
 
-func createClusterConfig(ctx context.Context, clusterName string) (*v1alpha5.ClusterConfig, error) {
+func createClusterConfig(ctx context.Context, clusterName string, opts Opts) (*v1alpha5.ClusterConfig, error) {
 	freeHostPort, err := freeport.GetFreePort()
 	if err != nil {
 		return nil, fmt.Errorf("could not find free port for port-forward: %w", err)
@@ -216,7 +235,7 @@ my.company.registry":
 				ExtraArgs: []v1alpha5.K3sArgWithNodeFilters{
 					{ // nodeFilters settings may correspond with the number of servers and agents above
 						// TODO extract with proper naming because here goes some magic
-						Arg:         "--kubelet-arg=eviction-hard=imagefs.available<90%,nodefs.available<90%",
+						Arg:         "--kubelet-arg=eviction-hard=" + opts.NodeConditionEvictionHardArg,
 						NodeFilters: []string{nodeFilter},
 					},
 				}},
@@ -269,16 +288,16 @@ my.company.registry":
 }
 
 // CreateK3dCluster creates a completely new K8s cluster with an optional clusterNamePrefix.
-func CreateK3dCluster(ctx context.Context, t *testing.T, clusterNamePrefix string) (cl *K3dCluster, err error) {
+func CreateK3dCluster(ctx context.Context, opts Opts) (cl *K3dCluster, err error) {
 	containerRuntime := runtimes.SelectedRuntime
 
-	clusterName := naming.MustGenerateK8sName(clusterNamePrefix)
+	clusterName := naming.MustGenerateK8sName(opts.ClusterNamePrefix)
 	cl = &K3dCluster{
 		containerRuntime: containerRuntime,
 		ClusterName:      clusterName,
 	}
 
-	cl.clusterConfig, err = createClusterConfig(ctx, clusterName)
+	cl.clusterConfig, err = createClusterConfig(ctx, clusterName, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -487,52 +506,23 @@ type NodeHealthCheckOpts struct {
 }
 
 func (c *K3dCluster) checkNodeHealth(ctx context.Context, opts NodeHealthCheckOpts) error {
-	nodeInfo, err := c.NodeInfo(ctx)
+	if opts.SkipCheck {
+		l.Log().Debugf("testcluster-go: skipping health-check all nodes")
+		return nil
+	}
+
+	nodeInfo, err := health.FetchNodeInfo(ctx, c.clientSet)
 	if err != nil {
 		return err
 	}
 
-	if opts.SkipCheck {
-		l.Log().Debugf("testcluster-go: skipping health-check for node %s/%s", nodeInfo.Namespace, nodeInfo.Name)
-		return nil
+	err = health.CheckCondition(nodeInfo)
+	if err != nil {
+		return err
 	}
 
-	if len(nodeInfo.Spec.Taints) > 0 {
-		return fmt.Errorf("node is not healthy: taint list is not empty: %#v", nodeInfo.Spec.Taints)
-
-	}
-	if len(nodeInfo.Status.Conditions) > 0 {
-		return fmt.Errorf("node is not healthy: condition list is not empty: %#v", nodeInfo.Status.Conditions)
-	}
-
-	l.Log().Debugf("testcluster-go: node %s/%s looks healthy", nodeInfo.Namespace, nodeInfo.Name)
+	l.Log().Debugf("testcluster-go: node looks healthy for nodes %s", nodeInfo.String())
 	return nil
-}
-
-// NodeInfo provides data about a k3d cluster node.
-type NodeInfo struct {
-	*v1.Node
-}
-
-// NodeInfo returns information about current nodes.
-func (c *K3dCluster) NodeInfo(ctx context.Context) (info NodeInfo, err error) {
-	clientset, err := c.ClientSet()
-	if err != nil {
-		return info, fmt.Errorf("could not retrieve node info: %w", err)
-	}
-
-	list, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return info, fmt.Errorf("could not list nodes: %w", err)
-	}
-
-	if len(list.Items) == 0 {
-		return info, fmt.Errorf("could not return node info because no node was found (was it killed in the meantime?)")
-	}
-	if len(list.Items) > 1 {
-		return info, fmt.Errorf("node info does not support more than one node right now")
-	}
-	return NodeInfo{&list.Items[0]}, nil
 }
 
 // WriteKubeConfig writes a Kube Config into the directory. This directory is the

@@ -21,7 +21,7 @@ var simpleEchoPodBytes []byte
 
 func TestIntegration(t *testing.T) {
 	// given
-	cl := cluster.NewK3dClusterWithOpts(t, cluster.Opts{LogLevel: cluster.Debug})
+	cl := cluster.NewK3dClusterWithOpts(t, cluster.Opts{LogLevel: cluster.Debug, ClusterNamePrefix: "hello-world"})
 	ctx := context.Background()
 	cl.WriteKubeConfig(ctx, t)
 
