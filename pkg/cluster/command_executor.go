@@ -183,9 +183,7 @@ func podHasStatus(pod *corev1.Pod, expectedPodStatus string) error {
 		return fmt.Errorf("unsupported pod status: %s", expectedPodStatus)
 	}
 
-	l.Log().Info("===== =====")
 	l.Log().Infof("expectedPodStatus status %s not fulfilled", expectedPodStatus)
-	l.Log().Info("===== =====")
 	return &TestableRetrierError{Err: fmt.Errorf("expectedPodStatus status %s not fulfilled", expectedPodStatus)}
 }
 
